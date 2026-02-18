@@ -14,11 +14,13 @@ pub struct CategoryDiff {
     pub changed: Vec<ChangedItem>,
 }
 
-/// An item that was changed, identified by its code, with a set of field-level changes.
+/// An item that was changed, identified by its code, with a set of field-level changes
+/// and optional nested sub-diffs (e.g. added/removed items within a field).
 #[derive(Debug)]
 pub struct ChangedItem {
     pub code: String,
     pub changes: Vec<FieldChange>,
+    pub nested_diffs: Vec<NestedFieldDiff>,
 }
 
 /// A single field-level change, with a dotted path (e.g. "labels.en_US"), old value, and new value.
@@ -27,6 +29,15 @@ pub struct FieldChange {
     pub field_path: String,
     pub old: String,
     pub new: String,
+}
+
+/// A nested sub-diff within a changed item's field, containing added/removed lists.
+/// For example, a family's "attributes" field may have added or removed attribute codes.
+#[derive(Debug)]
+pub struct NestedFieldDiff {
+    pub field_path: String,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
 }
 
 /// Parse diff data from a JSON value (typically the `data` JSONB column from the database).
@@ -86,19 +97,31 @@ fn parse_changed_item(value: &Value) -> Option<ChangedItem> {
     let changes_obj = changes_value.as_object()?;
 
     let mut changes = Vec::new();
+    let mut nested_diffs = Vec::new();
     for (field_name, field_value) in changes_obj {
-        flatten_changes(field_name, field_value, &mut changes);
+        flatten_changes(field_name, field_value, &mut changes, &mut nested_diffs);
     }
 
-    Some(ChangedItem { code, changes })
+    Some(ChangedItem {
+        code,
+        changes,
+        nested_diffs,
+    })
 }
 
-/// Recursively flatten nested change objects into a flat list of `FieldChange`.
+/// Recursively flatten nested change objects into a flat list of `FieldChange`,
+/// and collect any nested sub-diffs (added/removed arrays) into `NestedFieldDiff`.
 ///
 /// A leaf change has `{"old": ..., "new": ...}`.
+/// A nested sub-diff has `{"added": [...], "removed": [...]}`.
 /// A nested change has sub-keys that themselves contain changes,
 /// e.g. `{"labels": {"en_US": {"old": "...", "new": "..."}}}`.
-fn flatten_changes(prefix: &str, value: &Value, out: &mut Vec<FieldChange>) {
+fn flatten_changes(
+    prefix: &str,
+    value: &Value,
+    out: &mut Vec<FieldChange>,
+    nested_out: &mut Vec<NestedFieldDiff>,
+) {
     let Some(obj) = value.as_object() else {
         return;
     };
@@ -115,10 +138,35 @@ fn flatten_changes(prefix: &str, value: &Value, out: &mut Vec<FieldChange>) {
         return;
     }
 
+    // Check if this is a nested sub-diff: has "added" and/or "removed" keys (arrays)
+    let has_added = obj.get("added").is_some_and(|v| v.is_array());
+    let has_removed = obj.get("removed").is_some_and(|v| v.is_array());
+
+    if has_added || has_removed {
+        let added = obj
+            .get("added")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().map(|v| format_value(v)).collect())
+            .unwrap_or_default();
+
+        let removed = obj
+            .get("removed")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().map(|v| format_value(v)).collect())
+            .unwrap_or_default();
+
+        nested_out.push(NestedFieldDiff {
+            field_path: prefix.to_string(),
+            added,
+            removed,
+        });
+        return;
+    }
+
     // Otherwise recurse into sub-keys
     for (key, sub_value) in obj {
         let path = format!("{}.{}", prefix, key);
-        flatten_changes(&path, sub_value, out);
+        flatten_changes(&path, sub_value, out, nested_out);
     }
 }
 
@@ -166,6 +214,7 @@ pub fn extract_item_properties(item: &Value) -> Vec<(String, String)> {
         "group",
         "labels",
         "group_labels",
+        "attributes",
         "decimal_places",
         "default_value",
         "display_time",

@@ -112,13 +112,19 @@ async fn handle_snapshot(pool: &sqlx::PgPool, snapshot_id: Uuid, publish: bool) 
     println!("Fetching snapshot: {}", snapshot_id);
     let snapshot = db::fetch_snapshot(pool, snapshot_id).await?;
 
-    // Render the page
-    let (title, body) = renderer::render_snapshot_page(snapshot.label.as_deref(), &snapshot.data);
+    // Render multi-page snapshot tree
+    let page_tree =
+        renderer::render_snapshot_pages(snapshot.label.as_deref(), &snapshot.data);
 
-    println!("\n--- Page Title ---");
-    println!("{}", title);
-    println!("\n--- Page Body (Confluence Wiki Markup) ---");
-    println!("{}", body);
+    // Print root page
+    println!("\n--- Root Page: {} ---", page_tree.root_title);
+    println!("{}", page_tree.root_body);
+
+    // Print child pages
+    for child in &page_tree.children {
+        println!("\n--- Child Page: {} ---", child.title);
+        println!("{}", child.body);
+    }
 
     if publish {
         let confluence_config =
@@ -127,7 +133,27 @@ async fn handle_snapshot(pool: &sqlx::PgPool, snapshot_id: Uuid, publish: bool) 
         let client = confluence::ConfluenceClient::new(config);
 
         println!("\n--- Publishing to Confluence ---");
-        client.publish_page(&title, &body).await?;
+
+        // 1. Publish the root "Current model" page under the configured parent
+        let root_page_id = client
+            .publish_page(&page_tree.root_title, &page_tree.root_body)
+            .await?;
+        println!(
+            "Root page '{}' published (id={})",
+            page_tree.root_title, root_page_id
+        );
+
+        // 2. Publish each category child page under the root page
+        for child in &page_tree.children {
+            let child_id = client
+                .publish_page_under_id(&child.title, &child.body, &root_page_id)
+                .await?;
+            println!(
+                "Child page '{}' published (id={})",
+                child.title, child_id
+            );
+        }
+
         println!("Done!");
     }
 
