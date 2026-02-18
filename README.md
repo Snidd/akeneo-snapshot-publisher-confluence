@@ -94,6 +94,41 @@ curl http://localhost:3000/api/diff/550e8400-e29b-41d4-a716-446655440000
 }
 ```
 
+## Docker
+
+### Running with Docker
+
+```bash
+docker run -e DATABASE_URL="postgres://user:pass@host:5432/dbname" \
+  -p 3000:3000 \
+  ghcr.io/<owner>/rust-confluence-documenter
+```
+
+Override optional settings:
+
+```bash
+docker run -e DATABASE_URL="postgres://user:pass@host:5432/dbname" \
+  -e PORT=8080 \
+  -e RUST_LOG=debug \
+  -p 8080:8080 \
+  ghcr.io/<owner>/rust-confluence-documenter
+```
+
+### Building locally
+
+```bash
+docker build -t rust-confluence-documenter .
+docker run -e DATABASE_URL="postgres://user:pass@host:5432/dbname" \
+  -p 3000:3000 \
+  rust-confluence-documenter
+```
+
+The Dockerfile uses a multi-stage build with [cargo-chef](https://github.com/LukeMathWalker/cargo-chef) for dependency caching, resulting in fast rebuilds when only source code changes. The final image is based on `debian:bookworm-slim`.
+
+### CI/CD
+
+A GitHub Actions workflow (`.github/workflows/build-and-publish.yml`) automatically builds and publishes the Docker image to GitHub Container Registry on every push to `main`. The image is tagged with both `latest` and the short git SHA.
+
 ## Project Structure
 
 ```
