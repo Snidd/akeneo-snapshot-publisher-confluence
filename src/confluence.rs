@@ -2,8 +2,15 @@ use anyhow::{bail, Context, Result};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::Client;
 use serde::Deserialize;
+use tracing::info;
 
 use crate::db::DbConfluenceConfig;
+
+/// Result of a successful page publish (create or update).
+pub struct PublishResult {
+    pub page_id: String,
+    pub web_url: String,
+}
 
 /// Configuration for connecting to Confluence Cloud.
 pub struct ConfluenceConfig {
@@ -124,7 +131,7 @@ impl ConfluenceClient {
         title: &str,
         body_storage: &str,
         parent_id: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<PublishResult> {
         let url = format!(
             "{}/wiki/rest/api/content",
             self.config.base_url.trim_end_matches('/')
@@ -182,8 +189,11 @@ impl ConfluenceClient {
             resp.json().await.context("Failed to parse create response")?;
 
         let web_url = self.build_web_url(&result);
-        println!("Created new page: {}", web_url);
-        Ok(result.id)
+        info!("Created new page: {}", web_url);
+        Ok(PublishResult {
+            page_id: result.id,
+            web_url,
+        })
     }
 
     /// Update an existing Confluence page using storage (XHTML) representation.
@@ -193,7 +203,7 @@ impl ConfluenceClient {
         title: &str,
         body_storage: &str,
         current_version: u64,
-    ) -> Result<String> {
+    ) -> Result<PublishResult> {
         let url = format!(
             "{}/wiki/rest/api/content/{}",
             self.config.base_url.trim_end_matches('/'),
@@ -235,18 +245,21 @@ impl ConfluenceClient {
             resp.json().await.context("Failed to parse update response")?;
 
         let web_url = self.build_web_url(&result);
-        println!(
+        info!(
             "Updated existing page (v{}): {}",
             current_version + 1,
             web_url
         );
-        Ok(result.id)
+        Ok(PublishResult {
+            page_id: result.id,
+            web_url,
+        })
     }
 
     /// Create or update a Confluence page with the given title and storage format body.
     /// If a page with the same title already exists in the space, it will be updated.
     /// Otherwise, a new page will be created under the configured parent page.
-    pub async fn publish_page(&self, title: &str, body_storage: &str) -> Result<String> {
+    pub async fn publish_page(&self, title: &str, body_storage: &str) -> Result<PublishResult> {
         self.upsert_page(title, body_storage, None).await
     }
 
@@ -258,7 +271,7 @@ impl ConfluenceClient {
         title: &str,
         body_storage: &str,
         parent_id: &str,
-    ) -> Result<String> {
+    ) -> Result<PublishResult> {
         self.upsert_page(title, body_storage, Some(parent_id)).await
     }
 
@@ -268,12 +281,12 @@ impl ConfluenceClient {
         title: &str,
         body_storage: &str,
         parent_id: Option<&str>,
-    ) -> Result<String> {
-        println!("Searching for existing page: \"{}\"...", title);
+    ) -> Result<PublishResult> {
+        info!("Searching for existing page: \"{}\"...", title);
 
         match self.find_page(title).await? {
             Some((page_id, version)) => {
-                println!(
+                info!(
                     "Found existing page (id={}, version={}). Updating...",
                     page_id, version
                 );
@@ -281,7 +294,7 @@ impl ConfluenceClient {
                     .await
             }
             None => {
-                println!("No existing page found. Creating new page...");
+                info!("No existing page found. Creating new page...");
                 self.create_page(title, body_storage, parent_id).await
             }
         }

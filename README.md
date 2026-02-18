@@ -1,6 +1,6 @@
 # Confluence Documenter
 
-A CLI tool that reads Akeneo PIM snapshot and diff data from a PostgreSQL database and renders it as Confluence Wiki Markup pages. Output is printed to stdout by default, with an option to publish directly to Confluence Cloud.
+A web service that reads Akeneo PIM snapshot and diff data from a PostgreSQL database, renders it as Confluence storage format (XHTML) pages, and publishes them to Confluence Cloud.
 
 ## Prerequisites
 
@@ -31,78 +31,87 @@ The compiled binary will be at `target/release/rust-confluence-documenter`.
 
 ## Configuration
 
-The only required environment variable is:
-
-| Variable | Description |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string (e.g. `postgres://user:pass@localhost:5432/dbname`) |
+| Variable | Required | Description |
+|---|---|---|
+| `DATABASE_URL` | Yes | PostgreSQL connection string (e.g. `postgres://user:pass@localhost:5432/dbname`) |
+| `PORT` | No | HTTP server port (defaults to `3000`) |
+| `RUST_LOG` | No | Log level filter (defaults to `info`). See [tracing-subscriber docs](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/struct.EnvFilter.html) for syntax. |
 
 Confluence connection details (base URL, credentials, space key, parent page) are read from the `confluence_config` table in the database, not from environment variables.
 
 ## Usage
 
-The tool has two subcommands: `diff` and `snapshot`.
-
-### Print a diff
-
-Fetches a diff by its UUID, renders it as Confluence Wiki Markup, and prints to stdout:
+The application starts an HTTP server with two endpoints. Both endpoints fetch data from the database, render Confluence pages, publish them, and return the resulting page URL.
 
 ```bash
-DATABASE_URL=postgres://user:pass@localhost/mydb \
-  cargo run -- diff <diff-uuid>
+DATABASE_URL=postgres://user:pass@localhost/mydb cargo run
 ```
 
-### Print a snapshot
+### Endpoints
 
-Fetches a snapshot by its UUID, renders it as a categorized item listing, and prints to stdout:
+#### `GET /api/snapshot/{id}`
+
+Fetches a snapshot by UUID, renders a multi-page Confluence page tree (root page + one child page per category), publishes all pages, and returns the root page URL.
 
 ```bash
-DATABASE_URL=postgres://user:pass@localhost/mydb \
-  cargo run -- snapshot <snapshot-uuid>
+curl http://localhost:3000/api/snapshot/550e8400-e29b-41d4-a716-446655440000
 ```
 
-### Publish to Confluence
+#### `GET /api/diff/{id}`
 
-Add the `--publish` flag to any subcommand to also push the rendered page to Confluence Cloud. The tool will create a new page or update an existing one with the same title (upsert behavior):
+Fetches a diff by UUID (along with its before/after snapshots), renders a single Confluence diff page, publishes it, and returns the page URL.
 
 ```bash
-# Publish a diff
-DATABASE_URL=postgres://user:pass@localhost/mydb \
-  cargo run -- diff <diff-uuid> --publish
-
-# Publish a snapshot
-DATABASE_URL=postgres://user:pass@localhost/mydb \
-  cargo run -- snapshot <snapshot-uuid> --publish
+curl http://localhost:3000/api/diff/550e8400-e29b-41d4-a716-446655440000
 ```
 
-### Help
+### Response Format
 
-```bash
-cargo run -- --help
-cargo run -- diff --help
-cargo run -- snapshot --help
+**Success (200):**
+
+```json
+{
+  "status": "ok",
+  "page_url": "https://your-instance.atlassian.net/wiki/spaces/SPACE/pages/12345/Page+Title"
+}
+```
+
+**Not Found (404):**
+
+```json
+{
+  "status": "error",
+  "message": "Snapshot not found: 550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Internal Server Error (500):**
+
+```json
+{
+  "status": "error",
+  "message": "Failed to publish root page to Confluence: ..."
+}
 ```
 
 ## Project Structure
 
 ```
 src/
-  main.rs         CLI entry point and subcommand handling
+  main.rs         HTTP server setup, route handlers (Axum)
   db.rs           PostgreSQL queries (diff, snapshot, confluence_config)
   diff.rs         Parses diff JSON data into structured report types
-  renderer.rs     Renders diffs and snapshots as Confluence Wiki Markup
-  confluence.rs   Confluence Cloud REST API client (async, wiki representation)
+  renderer.rs     Renders diffs and snapshots as Confluence storage format (XHTML)
+  confluence.rs   Confluence Cloud REST API client (search, create, update pages)
 ```
 
 ## Output Format
 
-All output uses [Confluence Wiki Markup](https://confluence.atlassian.com/doc/confluence-wiki-markup-251003035.html) syntax, including:
+All rendered content uses [Confluence Storage Format](https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html) (XHTML), including:
 
-- `h2.` / `h3.` headings
-- `||heading||` / `|cell|` tables
-- `{{monospace}}` code formatting
-- `{status:title=...|colour=...}` status lozenges
-- `{color:red}...{color}` colored text for old/new diff values
-- `{info}...{info}` info panels
+- Standard HTML elements (`<h2>`, `<table>`, `<ul>`, `<code>`, etc.)
+- `<ac:structured-macro ac:name="status">` colored status lozenges
+- `<ac:structured-macro ac:name="info">` info panels
+- `<span style="color: red/green">` colored text for old/new diff values
 
-When publishing, the API sends content with `"representation": "wiki"` which Confluence converts to storage format server-side.
+When publishing, the API sends content with `"representation": "storage"` which Confluence renders directly.
