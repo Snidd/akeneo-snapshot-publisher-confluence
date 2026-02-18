@@ -1,10 +1,8 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
 
-/// Represents the entire diff file: a map of category names (e.g. "attributes", "families")
+/// Represents the entire diff: a map of category names (e.g. "attributes", "families")
 /// to their respective diffs.
 pub type DiffReport = HashMap<String, CategoryDiff>;
 
@@ -31,16 +29,11 @@ pub struct FieldChange {
     pub new: String,
 }
 
-/// Parse a diff JSON file into a `DiffReport`.
-pub fn parse_diff_file(path: &Path) -> Result<DiffReport> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read diff file: {}", path.display()))?;
-    let root: Value =
-        serde_json::from_str(&content).with_context(|| "Failed to parse diff JSON")?;
-
+/// Parse diff data from a JSON value (typically the `data` JSONB column from the database).
+pub fn parse_diff_data(root: &Value) -> Result<DiffReport> {
     let obj = root
         .as_object()
-        .with_context(|| "Diff JSON root must be an object")?;
+        .context("Diff data root must be an object")?;
 
     let mut report = DiffReport::new();
 

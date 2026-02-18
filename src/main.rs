@@ -1,83 +1,135 @@
 mod confluence;
+mod db;
 mod diff;
 mod renderer;
 
 use anyhow::Result;
-use clap::Parser;
-use std::path::PathBuf;
+use clap::{Parser, Subcommand};
+use uuid::Uuid;
 
-/// Generate Confluence release notes from a JSON diff file.
+/// Generate Confluence documentation from Akeneo snapshot and diff data.
 ///
-/// Reads a diff JSON file describing added, removed, and changed items across
-/// categories (e.g. attributes, families), and publishes a formatted release
-/// notes page to Confluence Cloud.
+/// Reads data from a PostgreSQL database (via DATABASE_URL env var) and renders
+/// Confluence Wiki Markup pages for diffs or snapshots.
 ///
-/// Required environment variables:
-///   CONFLUENCE_URL        — Base URL (e.g. https://yoursite.atlassian.net)
-///   CONFLUENCE_EMAIL      — API user email
-///   CONFLUENCE_API_TOKEN  — API token
-///   CONFLUENCE_SPACE_KEY  — Space key (e.g. DOC)
+/// Prints rendered output to stdout by default. Use --publish to also push
+/// the page to Confluence Cloud (using configuration from the database).
 #[derive(Parser, Debug)]
-#[command(name = "confluence-release-notes", about, disable_version_flag = true)]
+#[command(name = "confluence-documenter")]
 struct Cli {
-    /// Path to the diff JSON file
-    #[arg(short, long, default_value = "diff.json")]
-    file: PathBuf,
-
-    /// Release version (e.g. "1.2.0")
-    #[arg(short, long)]
-    version: String,
-
-    /// Release description
-    #[arg(short, long)]
-    description: String,
-
-    /// Parent page ID to nest the release notes under (optional)
-    #[arg(short, long)]
-    parent_page_id: Option<String>,
-
-    /// Dry run: render the page and print to stdout without publishing
-    #[arg(long, default_value_t = false)]
-    dry_run: bool,
+    #[command(subcommand)]
+    command: Command,
 }
 
-fn main() -> Result<()> {
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Render a diff between two snapshots
+    Diff {
+        /// The UUID of the diff to render
+        diff_id: Uuid,
+
+        /// Publish the rendered page to Confluence
+        #[arg(long, default_value_t = false)]
+        publish: bool,
+    },
+
+    /// Render a snapshot
+    Snapshot {
+        /// The UUID of the snapshot to render
+        snapshot_id: Uuid,
+
+        /// Publish the rendered page to Confluence
+        #[arg(long, default_value_t = false)]
+        publish: bool,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let pool = db::connect().await?;
 
-    // Parse the diff file
-    println!("Reading diff from: {}", cli.file.display());
-    let report = diff::parse_diff_file(&cli.file)?;
+    match cli.command {
+        Command::Diff { diff_id, publish } => {
+            handle_diff(&pool, diff_id, publish).await?;
+        }
+        Command::Snapshot {
+            snapshot_id,
+            publish,
+        } => {
+            handle_snapshot(&pool, snapshot_id, publish).await?;
+        }
+    }
 
-    // Print a quick summary
-    for (category, diff) in &report {
+    Ok(())
+}
+
+async fn handle_diff(pool: &sqlx::PgPool, diff_id: Uuid, publish: bool) -> Result<()> {
+    println!("Fetching diff: {}", diff_id);
+    let (diff_row, before_snapshot, after_snapshot) = db::fetch_diff(pool, diff_id).await?;
+
+    // Parse the diff data
+    let report = diff::parse_diff_data(&diff_row.data)?;
+
+    // Print summary
+    for (category, cat_diff) in &report {
         println!(
             "  {}: {} added, {} removed, {} changed",
             category,
-            diff.added.len(),
-            diff.removed.len(),
-            diff.changed.len()
+            cat_diff.added.len(),
+            cat_diff.removed.len(),
+            cat_diff.changed.len()
         );
     }
 
-    // Render the Confluence page body
-    let title = renderer::page_title(&cli.version);
-    let body = renderer::render_page(&cli.version, &cli.description, &report);
+    // Render the page
+    let (title, body) = renderer::render_diff_page(
+        before_snapshot.label.as_deref(),
+        after_snapshot.label.as_deref(),
+        &report,
+    );
 
-    if cli.dry_run {
-        println!("\n--- Page Title ---");
-        println!("{}", title);
-        println!("\n--- Page Body (Confluence Storage Format) ---");
-        println!("{}", body);
-        println!("\n--- Dry run complete. No page was published. ---");
-        return Ok(());
+    println!("\n--- Page Title ---");
+    println!("{}", title);
+    println!("\n--- Page Body (Confluence Wiki Markup) ---");
+    println!("{}", body);
+
+    if publish {
+        let confluence_config =
+            db::fetch_confluence_config(pool, after_snapshot.akeneo_server_id).await?;
+        let config = confluence::ConfluenceConfig::from_db(confluence_config);
+        let client = confluence::ConfluenceClient::new(config);
+
+        println!("\n--- Publishing to Confluence ---");
+        client.publish_page(&title, &body).await?;
+        println!("Done!");
     }
 
-    // Publish to Confluence
-    let config = confluence::ConfluenceConfig::from_env()?;
-    let client = confluence::ConfluenceClient::new(config);
+    Ok(())
+}
 
-    client.publish_page(&title, &body, cli.parent_page_id.as_deref())?;
+async fn handle_snapshot(pool: &sqlx::PgPool, snapshot_id: Uuid, publish: bool) -> Result<()> {
+    println!("Fetching snapshot: {}", snapshot_id);
+    let snapshot = db::fetch_snapshot(pool, snapshot_id).await?;
 
-    println!("Done!");
+    // Render the page
+    let (title, body) = renderer::render_snapshot_page(snapshot.label.as_deref(), &snapshot.data);
+
+    println!("\n--- Page Title ---");
+    println!("{}", title);
+    println!("\n--- Page Body (Confluence Wiki Markup) ---");
+    println!("{}", body);
+
+    if publish {
+        let confluence_config =
+            db::fetch_confluence_config(pool, snapshot.akeneo_server_id).await?;
+        let config = confluence::ConfluenceConfig::from_db(confluence_config);
+        let client = confluence::ConfluenceClient::new(config);
+
+        println!("\n--- Publishing to Confluence ---");
+        client.publish_page(&title, &body).await?;
+        println!("Done!");
+    }
+
     Ok(())
 }
