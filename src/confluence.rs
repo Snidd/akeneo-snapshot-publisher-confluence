@@ -116,13 +116,13 @@ impl ConfluenceClient {
         }
     }
 
-    /// Create a new Confluence page using wiki markup representation.
+    /// Create a new Confluence page using storage (XHTML) representation.
     /// If `parent_id` is provided, the page is nested under that parent.
     /// Otherwise, falls back to the configured parent page title.
     async fn create_page(
         &self,
         title: &str,
-        body_wiki: &str,
+        body_storage: &str,
         parent_id: Option<&str>,
     ) -> Result<String> {
         let url = format!(
@@ -137,9 +137,9 @@ impl ConfluenceClient {
                 "key": &self.config.space_key
             },
             "body": {
-                "wiki": {
-                    "value": body_wiki,
-                    "representation": "wiki"
+                "storage": {
+                    "value": body_storage,
+                    "representation": "storage"
                 }
             }
         });
@@ -186,12 +186,12 @@ impl ConfluenceClient {
         Ok(result.id)
     }
 
-    /// Update an existing Confluence page using wiki markup representation.
+    /// Update an existing Confluence page using storage (XHTML) representation.
     async fn update_page(
         &self,
         page_id: &str,
         title: &str,
-        body_wiki: &str,
+        body_storage: &str,
         current_version: u64,
     ) -> Result<String> {
         let url = format!(
@@ -207,9 +207,9 @@ impl ConfluenceClient {
                 "number": current_version + 1
             },
             "body": {
-                "wiki": {
-                    "value": body_wiki,
-                    "representation": "wiki"
+                "storage": {
+                    "value": body_storage,
+                    "representation": "storage"
                 }
             }
         });
@@ -243,11 +243,11 @@ impl ConfluenceClient {
         Ok(result.id)
     }
 
-    /// Create or update a Confluence page with the given title and wiki markup body.
+    /// Create or update a Confluence page with the given title and storage format body.
     /// If a page with the same title already exists in the space, it will be updated.
     /// Otherwise, a new page will be created under the configured parent page.
-    pub async fn publish_page(&self, title: &str, body_wiki: &str) -> Result<String> {
-        self.upsert_page(title, body_wiki, None).await
+    pub async fn publish_page(&self, title: &str, body_storage: &str) -> Result<String> {
+        self.upsert_page(title, body_storage, None).await
     }
 
     /// Create or update a Confluence page under a specific parent page (by ID).
@@ -256,17 +256,17 @@ impl ConfluenceClient {
     pub async fn publish_page_under_id(
         &self,
         title: &str,
-        body_wiki: &str,
+        body_storage: &str,
         parent_id: &str,
     ) -> Result<String> {
-        self.upsert_page(title, body_wiki, Some(parent_id)).await
+        self.upsert_page(title, body_storage, Some(parent_id)).await
     }
 
     /// Internal upsert logic shared by publish_page and publish_page_under_id.
     async fn upsert_page(
         &self,
         title: &str,
-        body_wiki: &str,
+        body_storage: &str,
         parent_id: Option<&str>,
     ) -> Result<String> {
         println!("Searching for existing page: \"{}\"...", title);
@@ -277,11 +277,12 @@ impl ConfluenceClient {
                     "Found existing page (id={}, version={}). Updating...",
                     page_id, version
                 );
-                self.update_page(&page_id, title, body_wiki, version).await
+                self.update_page(&page_id, title, body_storage, version)
+                    .await
             }
             None => {
                 println!("No existing page found. Creating new page...");
-                self.create_page(title, body_wiki, parent_id).await
+                self.create_page(title, body_storage, parent_id).await
             }
         }
     }

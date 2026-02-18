@@ -6,7 +6,7 @@ use std::collections::HashMap;
 // Diff rendering
 // =============================================================================
 
-/// Render a diff page in Confluence Wiki Markup format.
+/// Render a diff page in Confluence storage format (XHTML).
 /// Returns (page_title, page_body).
 pub fn render_diff_page(
     before_label: Option<&str>,
@@ -38,42 +38,44 @@ pub fn render_diff_page(
 
 fn render_diff_header(before: &str, after: &str) -> String {
     let mut out = String::new();
-    out.push_str("{info}\n");
-    out.push_str(&format!("*Before:* {}\n", escape_wiki(before)));
-    out.push_str(&format!("*After:* {}\n", escape_wiki(after)));
-    out.push_str("{info}\n\n");
-    out.push_str("----\n\n");
+    out.push_str(&info_panel(&format!(
+        "<strong>Before:</strong> {}<br/><strong>After:</strong> {}",
+        escape_html(before),
+        escape_html(after),
+    )));
+    out.push_str("<hr/>");
     out
 }
 
 fn render_summary_table(report: &DiffReport) -> String {
     let mut out = String::new();
-    out.push_str("h2. Summary\n\n");
+    out.push_str("<h2>Summary</h2>");
 
-    out.push_str("||Category||Added||Removed||Changed||\n");
+    out.push_str("<table data-layout=\"full-width\"><tbody>");
+    out.push_str("<tr><th>Category</th><th>Added</th><th>Removed</th><th>Changed</th></tr>");
 
     let mut categories: Vec<_> = report.iter().collect();
     categories.sort_by_key(|(name, _)| name.to_lowercase());
 
     for (name, diff) in &categories {
         out.push_str(&format!(
-            "|*{}*|{}|{}|{}|\n",
-            capitalize(&escape_wiki(name)),
+            "<tr><td><strong>{}</strong></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            capitalize(&escape_html(name)),
             status_badge("Added", diff.added.len(), "Green"),
             status_badge("Removed", diff.removed.len(), "Red"),
             status_badge("Changed", diff.changed.len(), "Yellow"),
         ));
     }
 
-    out.push('\n');
+    out.push_str("</tbody></table>");
     out
 }
 
 fn render_category(name: &str, diff: &CategoryDiff) -> String {
     let mut out = String::new();
-    let display_name = capitalize(&escape_wiki(name));
+    let display_name = capitalize(&escape_html(name));
 
-    out.push_str(&format!("h2. {}\n\n", display_name));
+    out.push_str(&format!("<h2>{}</h2>", display_name));
 
     out.push_str(&render_added_section(&diff.added));
     out.push_str(&render_removed_section(&diff.removed));
@@ -86,12 +88,12 @@ fn render_added_section(items: &[Value]) -> String {
     let mut out = String::new();
 
     out.push_str(&format!(
-        "h3. {} Added\n\n",
+        "<h3>{} Added</h3>",
         status_lozenge(items.len(), "Green"),
     ));
 
     if items.is_empty() {
-        out.push_str("_No additions._\n\n");
+        out.push_str("<p><em>No additions.</em></p>");
         return out;
     }
 
@@ -103,12 +105,12 @@ fn render_removed_section(items: &[Value]) -> String {
     let mut out = String::new();
 
     out.push_str(&format!(
-        "h3. {} Removed\n\n",
+        "<h3>{} Removed</h3>",
         status_lozenge(items.len(), "Red"),
     ));
 
     if items.is_empty() {
-        out.push_str("_No removals._\n\n");
+        out.push_str("<p><em>No removals.</em></p>");
         return out;
     }
 
@@ -120,29 +122,29 @@ fn render_changed_section(items: &[crate::diff::ChangedItem]) -> String {
     let mut out = String::new();
 
     out.push_str(&format!(
-        "h3. {} Changed\n\n",
+        "<h3>{} Changed</h3>",
         status_lozenge(items.len(), "Yellow"),
     ));
 
     if items.is_empty() {
-        out.push_str("_No changes._\n\n");
+        out.push_str("<p><em>No changes.</em></p>");
         return out;
     }
 
-    out.push_str("||Code||Field||Old Value||New Value||\n");
+    out.push_str("<table data-layout=\"full-width\"><tbody>");
+    out.push_str("<tr><th>Code</th><th>Field</th><th>Old Value</th><th>New Value</th></tr>");
 
     for item in items {
         // Render flat field-level changes (old → new)
         for change in &item.changes {
             out.push_str(&format!(
-                "|{{{{{}}}}}|{{{{{}}}}}|{color_red}{}{color_end}|{color_green}{}{color_end}|\n",
-                escape_wiki_cell(&item.code),
-                escape_wiki_cell(&change.field_path),
-                escape_wiki_cell(&change.old),
-                escape_wiki_cell(&change.new),
-                color_red = "{color:red}",
-                color_end = "{color}",
-                color_green = "{color:green}",
+                "<tr><td><code>{}</code></td><td><code>{}</code></td>\
+                 <td><span style=\"color: red;\">{}</span></td>\
+                 <td><span style=\"color: green;\">{}</span></td></tr>",
+                escape_html(&item.code),
+                escape_html(&change.field_path),
+                escape_html(&change.old),
+                escape_html(&change.new),
             ));
         }
 
@@ -152,38 +154,38 @@ fn render_changed_section(items: &[crate::diff::ChangedItem]) -> String {
                 let added_str = nested
                     .added
                     .iter()
-                    .map(|v| escape_wiki_cell(v))
+                    .map(|v| escape_html(v))
                     .collect::<Vec<_>>()
                     .join(", ");
                 out.push_str(&format!(
-                    "|{{{{{}}}}}|{{{{{}.added}}}}| |{color_green}{}{color_end}|\n",
-                    escape_wiki_cell(&item.code),
-                    escape_wiki_cell(&nested.field_path),
+                    "<tr><td><code>{}</code></td><td><code>{}.added</code></td>\
+                     <td></td>\
+                     <td><span style=\"color: green;\">{}</span></td></tr>",
+                    escape_html(&item.code),
+                    escape_html(&nested.field_path),
                     added_str,
-                    color_green = "{color:green}",
-                    color_end = "{color}",
                 ));
             }
             if !nested.removed.is_empty() {
                 let removed_str = nested
                     .removed
                     .iter()
-                    .map(|v| escape_wiki_cell(v))
+                    .map(|v| escape_html(v))
                     .collect::<Vec<_>>()
                     .join(", ");
                 out.push_str(&format!(
-                    "|{{{{{}}}}}|{{{{{}.removed}}}}|{color_red}{}{color_end}| |\n",
-                    escape_wiki_cell(&item.code),
-                    escape_wiki_cell(&nested.field_path),
+                    "<tr><td><code>{}</code></td><td><code>{}.removed</code></td>\
+                     <td><span style=\"color: red;\">{}</span></td>\
+                     <td></td></tr>",
+                    escape_html(&item.code),
+                    escape_html(&nested.field_path),
                     removed_str,
-                    color_red = "{color:red}",
-                    color_end = "{color}",
                 ));
             }
         }
     }
 
-    out.push('\n');
+    out.push_str("</tbody></table>");
     out
 }
 
@@ -204,13 +206,14 @@ fn render_item_table(items: &[Value]) -> String {
 
     let mut out = String::new();
 
+    out.push_str("<table data-layout=\"full-width\"><tbody>");
+
     // Header row
-    out.push_str("||");
+    out.push_str("<tr>");
     for col in &columns {
-        out.push_str(&capitalize(&escape_wiki(col)));
-        out.push_str("||");
+        out.push_str(&format!("<th>{}</th>", capitalize(&escape_html(col))));
     }
-    out.push('\n');
+    out.push_str("</tr>");
 
     // Data rows
     for props in &all_props {
@@ -219,20 +222,19 @@ fn render_item_table(items: &[Value]) -> String {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        out.push('|');
+        out.push_str("<tr>");
         for col in &columns {
             let val = prop_map.get(col.as_str()).unwrap_or(&"\u{2014}");
             if col == "code" {
-                out.push_str(&format!("{{{{{}}}}}", escape_wiki_cell(val)));
+                out.push_str(&format!("<td><code>{}</code></td>", escape_html(val)));
             } else {
-                out.push_str(&escape_wiki_cell(val));
+                out.push_str(&format!("<td>{}</td>", escape_html(val)));
             }
-            out.push('|');
         }
-        out.push('\n');
+        out.push_str("</tr>");
     }
 
-    out.push('\n');
+    out.push_str("</tbody></table>");
     out
 }
 
@@ -255,7 +257,7 @@ pub struct SnapshotChildPage {
     pub body: String,
 }
 
-/// Render a snapshot as a multi-page tree in Confluence Wiki Markup format.
+/// Render a snapshot as a multi-page tree in Confluence storage format (XHTML).
 ///
 /// Returns a `SnapshotPageTree` with:
 /// - A root "Current model" page containing a summary table
@@ -270,20 +272,22 @@ pub fn render_snapshot_pages(label: Option<&str>, data: &Value) -> SnapshotPageT
     let Some(obj) = data.as_object() else {
         return SnapshotPageTree {
             root_title,
-            root_body: "_No data available._\n".to_string(),
+            root_body: "<p><em>No data available.</em></p>".to_string(),
             children: Vec::new(),
         };
     };
 
     // Build root page body: info header + summary table
     let mut root_body = String::new();
-    root_body.push_str("{info}\n");
-    root_body.push_str(&format!("*Snapshot:* {}\n", escape_wiki(display_label)));
-    root_body.push_str("{info}\n\n");
-    root_body.push_str("----\n\n");
+    root_body.push_str(&info_panel(&format!(
+        "<strong>Snapshot:</strong> {}",
+        escape_html(display_label),
+    )));
+    root_body.push_str("<hr/>");
 
-    root_body.push_str("h2. Summary\n\n");
-    root_body.push_str("||Category||Items||\n");
+    root_body.push_str("<h2>Summary</h2>");
+    root_body.push_str("<table data-layout=\"full-width\"><tbody>");
+    root_body.push_str("<tr><th>Category</th><th>Items</th></tr>");
 
     let mut categories: Vec<_> = obj.iter().collect();
     categories.sort_by_key(|(name, _)| name.to_lowercase());
@@ -291,12 +295,12 @@ pub fn render_snapshot_pages(label: Option<&str>, data: &Value) -> SnapshotPageT
     for (name, value) in &categories {
         let count = value.as_array().map(|a| a.len()).unwrap_or(0);
         root_body.push_str(&format!(
-            "|*{}*|{}|\n",
-            capitalize(&escape_wiki(name)),
+            "<tr><td><strong>{}</strong></td><td>{}</td></tr>",
+            capitalize(&escape_html(name)),
             count,
         ));
     }
-    root_body.push('\n');
+    root_body.push_str("</tbody></table>");
 
     // Build child pages, one per category
     let mut children = Vec::new();
@@ -326,7 +330,7 @@ pub fn render_snapshot_pages(label: Option<&str>, data: &Value) -> SnapshotPageT
 /// Render a generic category child page (for non-family categories).
 fn render_category_page(items: &[Value]) -> String {
     if items.is_empty() {
-        return "_No items._\n\n".to_string();
+        return "<p><em>No items.</em></p>".to_string();
     }
     render_item_table(items)
 }
@@ -341,7 +345,7 @@ fn render_family_page(items: &[Value]) -> String {
     let mut out = String::new();
 
     if items.is_empty() {
-        out.push_str("_No families._\n\n");
+        out.push_str("<p><em>No families.</em></p>");
         return out;
     }
 
@@ -352,39 +356,44 @@ fn render_family_page(items: &[Value]) -> String {
             .unwrap_or("unknown");
 
         // Family heading
-        out.push_str(&format!("h2. {}\n\n", escape_wiki(code)));
+        out.push_str(&format!("<h2>{}</h2>", escape_html(code)));
 
         // Properties table
         let props = extract_item_properties(item);
         if !props.is_empty() {
-            out.push_str("||Property||Value||\n");
+            out.push_str("<table data-layout=\"full-width\"><tbody>");
+            out.push_str("<tr><th>Property</th><th>Value</th></tr>");
             for (key, val) in &props {
                 out.push_str(&format!(
-                    "|*{}*|{}|\n",
-                    capitalize(&escape_wiki(key)),
-                    escape_wiki_cell(val),
+                    "<tr><td><strong>{}</strong></td><td>{}</td></tr>",
+                    capitalize(&escape_html(key)),
+                    escape_html(val),
                 ));
             }
-            out.push('\n');
+            out.push_str("</tbody></table>");
         }
 
         // Attributes sub-section
         let attributes = item.get("attributes").and_then(|v| v.as_array());
 
-        out.push_str("h3. Attributes\n\n");
+        out.push_str("<h3>Attributes</h3>");
         match attributes {
             Some(attrs) if !attrs.is_empty() => {
+                out.push_str("<ul>");
                 for attr in attrs {
                     let attr_code = match attr {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    out.push_str(&format!("* {{{{{}}}}}\n", escape_wiki_cell(&attr_code)));
+                    out.push_str(&format!(
+                        "<li><code>{}</code></li>",
+                        escape_html(&attr_code),
+                    ));
                 }
-                out.push('\n');
+                out.push_str("</ul>");
             }
             _ => {
-                out.push_str("_No attributes._\n\n");
+                out.push_str("<p><em>No attributes.</em></p>");
             }
         }
     }
@@ -396,15 +405,42 @@ fn render_family_page(items: &[Value]) -> String {
 // Formatting helpers
 // =============================================================================
 
+/// Render a Confluence status macro (lozenge badge) in storage format.
 fn status_badge(label: &str, count: usize, color: &str) -> String {
-    if count == 0 {
-        return format!("{{status:title={}: 0|colour=Grey}}", label);
-    }
-    format!("{{status:title={}: {}|colour={}}}", label, count, color)
+    let (title, colour) = if count == 0 {
+        (format!("{}: 0", label), "Grey")
+    } else {
+        (format!("{}: {}", label, count), color)
+    };
+    format!(
+        "<ac:structured-macro ac:name=\"status\">\
+         <ac:parameter ac:name=\"title\">{}</ac:parameter>\
+         <ac:parameter ac:name=\"colour\">{}</ac:parameter>\
+         </ac:structured-macro>",
+        escape_html(&title),
+        colour,
+    )
 }
 
+/// Render a Confluence status macro (count-only lozenge) in storage format.
 fn status_lozenge(count: usize, color: &str) -> String {
-    format!("{{status:title={}|colour={}}}", count, color)
+    format!(
+        "<ac:structured-macro ac:name=\"status\">\
+         <ac:parameter ac:name=\"title\">{}</ac:parameter>\
+         <ac:parameter ac:name=\"colour\">{}</ac:parameter>\
+         </ac:structured-macro>",
+        count, color,
+    )
+}
+
+/// Render a Confluence info panel in storage format.
+fn info_panel(body_html: &str) -> String {
+    format!(
+        "<ac:structured-macro ac:name=\"info\">\
+         <ac:rich-text-body><p>{}</p></ac:rich-text-body>\
+         </ac:structured-macro>",
+        body_html,
+    )
 }
 
 fn capitalize(s: &str) -> String {
@@ -415,21 +451,10 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// Escape characters that have special meaning in Confluence wiki markup.
-fn escape_wiki(s: &str) -> String {
-    // In general wiki markup text, we escape braces and brackets
-    s.replace('{', "\\{")
-        .replace('}', "\\}")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
-}
-
-/// Escape characters inside table cells. Pipes must also be escaped
-/// to avoid breaking the table structure.
-fn escape_wiki_cell(s: &str) -> String {
-    s.replace('{', "\\{")
-        .replace('}', "\\}")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
-        .replace('|', "\\|")
+/// Escape characters that have special meaning in HTML/XHTML.
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
