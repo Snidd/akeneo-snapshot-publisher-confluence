@@ -192,7 +192,7 @@ fn render_changed_section(items: &[crate::diff::ChangedItem]) -> String {
 /// Render a table of added/removed items using their extracted properties.
 fn render_item_table(items: &[Value]) -> String {
     let all_props: Vec<Vec<(String, String)>> =
-        items.iter().map(|i| extract_item_properties(i)).collect();
+        items.iter().map(extract_item_properties).collect();
 
     // Determine unique column names, preserving insertion order
     let mut columns: Vec<String> = Vec::new();

@@ -12,8 +12,9 @@ use axum::{
 };
 use serde::Serialize;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 /// Shared application state passed to all handlers.
@@ -152,7 +153,10 @@ async fn handle_snapshot(
         page_tree.root_title, root_result.page_id
     );
 
-    // 5. Publish each child page under the root page
+    // 5. Publish each child page under the root page, tracking all published page IDs
+    let mut published_ids = HashSet::new();
+    published_ids.insert(root_result.page_id.clone());
+
     for child in &page_tree.children {
         match client
             .publish_page_under_id(&child.title, &child.body, &root_result.page_id)
@@ -163,6 +167,7 @@ async fn handle_snapshot(
                     "Child page '{}' published (id={})",
                     child.title, child_result.page_id
                 );
+                published_ids.insert(child_result.page_id);
             }
             Err(e) => {
                 error!("Failed to publish child page '{}': {:#}", child.title, e);
@@ -178,7 +183,47 @@ async fn handle_snapshot(
         }
     }
 
-    // 6. Return the root page URL
+    // 6. Clean up stale child pages that no longer exist in the snapshot
+    match client.get_child_pages(&root_result.page_id).await {
+        Ok(existing_children) => {
+            let stale_children: Vec<_> = existing_children
+                .into_iter()
+                .filter(|child| !published_ids.contains(&child.id))
+                .collect();
+
+            if !stale_children.is_empty() {
+                info!(
+                    "Found {} stale child page(s) to remove",
+                    stale_children.len()
+                );
+            }
+
+            for stale in &stale_children {
+                match client.delete_page(&stale.id).await {
+                    Ok(()) => {
+                        info!(
+                            "Deleted stale child page '{}' (id={})",
+                            stale.title, stale.id
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to delete stale child page '{}' (id={}): {:#}",
+                            stale.title, stale.id, e
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Failed to fetch existing child pages for stale cleanup: {:#}",
+                e
+            );
+        }
+    }
+
+    // 7. Return the root page URL
     (
         StatusCode::OK,
         Json(SuccessResponse {

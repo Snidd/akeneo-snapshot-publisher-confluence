@@ -146,13 +146,13 @@ fn flatten_changes(
         let added = obj
             .get("added")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().map(|v| format_value(v)).collect())
+            .map(|arr| arr.iter().map(format_value).collect())
             .unwrap_or_default();
 
         let removed = obj
             .get("removed")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().map(|v| format_value(v)).collect())
+            .map(|arr| arr.iter().map(format_value).collect())
             .unwrap_or_default();
 
         nested_out.push(NestedFieldDiff {
@@ -193,10 +193,8 @@ pub fn extract_item_properties(item: &Value) -> Vec<(String, String)> {
     let mut props = Vec::new();
 
     for &field in &priority_fields {
-        if let Some(val) = obj.get(field) {
-            if !val.is_null() {
-                props.push((field.to_string(), format_value(val)));
-            }
+        if let Some(val) = obj.get(field) && !val.is_null() {
+            props.push((field.to_string(), format_value(val)));
         }
     }
 

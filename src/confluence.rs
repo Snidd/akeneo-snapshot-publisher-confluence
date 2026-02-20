@@ -12,6 +12,12 @@ pub struct PublishResult {
     pub web_url: String,
 }
 
+/// Minimal info about an existing child page, used for stale page detection.
+pub struct ChildPageInfo {
+    pub id: String,
+    pub title: String,
+}
+
 /// Configuration for connecting to Confluence Cloud.
 pub struct ConfluenceConfig {
     pub base_url: String,
@@ -67,6 +73,22 @@ struct CreatePageResponse {
 struct PageLinks {
     #[serde(rename = "webui")]
     webui: Option<String>,
+}
+
+/// Response from the descendant/page endpoint (paginated).
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+struct DescendantPagesResponse {
+    results: Vec<DescendantPageResult>,
+    start: Option<u64>,
+    limit: Option<u64>,
+    size: u64,
+}
+
+#[derive(Deserialize, Debug)]
+struct DescendantPageResult {
+    id: String,
+    title: String,
 }
 
 impl ConfluenceClient {
@@ -321,5 +343,92 @@ impl ConfluenceClient {
                     response.id
                 )
             })
+    }
+
+    /// Get all child pages of a given parent page (paginates automatically).
+    /// Returns a list of `ChildPageInfo` with id and title for each child.
+    pub async fn get_child_pages(&self, parent_id: &str) -> Result<Vec<ChildPageInfo>> {
+        let base_url = format!(
+            "{}/wiki/rest/api/content/{}/descendant/page",
+            self.config.base_url.trim_end_matches('/'),
+            parent_id
+        );
+
+        let mut all_children = Vec::new();
+        let mut start: u64 = 0;
+        let limit: u64 = 25;
+
+        loop {
+            let resp = self
+                .client
+                .get(&base_url)
+                .basic_auth(&self.config.email, Some(&self.config.api_token))
+                .header(ACCEPT, "application/json")
+                .query(&[
+                    ("start", start.to_string()),
+                    ("limit", limit.to_string()),
+                ])
+                .send()
+                .await
+                .context("Failed to fetch child pages")?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                bail!(
+                    "Confluence get child pages failed (HTTP {}): {}",
+                    status,
+                    body
+                );
+            }
+
+            let page: DescendantPagesResponse = resp
+                .json()
+                .await
+                .context("Failed to parse child pages response")?;
+
+            let results_count = page.results.len() as u64;
+
+            for result in page.results {
+                all_children.push(ChildPageInfo {
+                    id: result.id,
+                    title: result.title,
+                });
+            }
+
+            // If we got fewer results than the limit, we've reached the end
+            if results_count < limit {
+                break;
+            }
+
+            start += results_count;
+        }
+
+        Ok(all_children)
+    }
+
+    /// Delete a Confluence page (moves it to trash).
+    pub async fn delete_page(&self, page_id: &str) -> Result<()> {
+        let url = format!(
+            "{}/wiki/rest/api/content/{}",
+            self.config.base_url.trim_end_matches('/'),
+            page_id
+        );
+
+        let resp = self
+            .client
+            .delete(&url)
+            .basic_auth(&self.config.email, Some(&self.config.api_token))
+            .send()
+            .await
+            .context("Failed to delete Confluence page")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("Confluence delete page failed (HTTP {}): {}", status, body);
+        }
+
+        Ok(())
     }
 }
