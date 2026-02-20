@@ -243,15 +243,15 @@ fn render_item_table(items: &[Value]) -> String {
 // =============================================================================
 
 /// A tree of pages representing a snapshot.
-/// The root page ("Current model") contains a summary, and each category
-/// gets its own child page.
+/// The root page contains the full overview (summary cards + all category tables),
+/// and each family gets its own child page with detailed configuration.
 pub struct SnapshotPageTree {
     pub root_title: String,
     pub root_body: String,
     pub children: Vec<SnapshotChildPage>,
 }
 
-/// A single child page for one category in the snapshot.
+/// A single child page (one per family in the snapshot).
 pub struct SnapshotChildPage {
     pub title: String,
     pub body: String,
@@ -260,13 +260,11 @@ pub struct SnapshotChildPage {
 /// Render a snapshot as a multi-page tree in Confluence storage format (XHTML).
 ///
 /// Returns a `SnapshotPageTree` with:
-/// - A root "Current model" page containing a summary table
-/// - One child page per root key in the snapshot JSON
-///
-/// The "families" category gets special treatment: each family is rendered as its
-/// own sub-section with a list of attributes belonging to that family.
+/// - A root "Akeneo Model Snapshot" page containing summary cards and all category tables
+/// - One child page per family with detailed configuration, attribute requirements, and
+///   enriched attribute tables cross-referenced against the snapshot's attribute data
 pub fn render_snapshot_pages(label: Option<&str>, data: &Value) -> SnapshotPageTree {
-    let display_label = label.unwrap_or("Unnamed snapshot");
+    let _display_label = label.unwrap_or("Unnamed snapshot");
     let root_title = "Current model".to_string();
 
     let Some(obj) = data.as_object() else {
@@ -277,124 +275,559 @@ pub fn render_snapshot_pages(label: Option<&str>, data: &Value) -> SnapshotPageT
         };
     };
 
-    // Build root page body: info header + summary table
-    let mut root_body = String::new();
-    root_body.push_str(&info_panel(&format!(
-        "<strong>Snapshot:</strong> {}",
-        escape_html(display_label),
-    )));
-    root_body.push_str("<hr/>");
+    let channels = obj
+        .get("channels")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let families = obj
+        .get("families")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let attributes = obj
+        .get("attributes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let categories = obj
+        .get("categories")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let attribute_options = obj.get("attribute_options");
 
-    root_body.push_str("<h2>Summary</h2>");
-    root_body.push_str("<table data-layout=\"full-width\"><tbody>");
-    root_body.push_str("<tr><th>Category</th><th>Items</th></tr>");
+    // Count attribute options (it's a dict of attribute_code -> [options])
+    let attr_options_count: usize = attribute_options
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.values()
+                .filter_map(|v| v.as_array())
+                .map(|a| a.len())
+                .sum()
+        })
+        .unwrap_or(0);
 
-    let mut categories: Vec<_> = obj.iter().collect();
-    categories.sort_by_key(|(name, _)| name.to_lowercase());
+    // ── Root page body ──────────────────────────────────────────────────
+    let mut body = String::new();
 
-    for (name, value) in &categories {
-        let count = value.as_array().map(|a| a.len()).unwrap_or(0);
-        root_body.push_str(&format!(
-            "<tr><td><strong>{}</strong></td><td>{}</td></tr>",
-            capitalize(&escape_html(name)),
-            count,
-        ));
-    }
-    root_body.push_str("</tbody></table>");
+    // Title section
+    body.push_str("<h1>Akeneo Model Snapshot</h1>");
+    body.push_str("<p>Overview of the PIM data model configuration \u{2014} channels, families, attributes, categories, and attribute options.</p>");
+    body.push_str("<hr/>");
 
-    // Build child pages, one per category
-    let mut children = Vec::new();
-    for (name, value) in &categories {
-        let page_title = capitalize(name);
-        let items = value.as_array().cloned().unwrap_or_default();
+    // Summary cards (rendered as a table)
+    body.push_str(&render_summary_cards(
+        channels.len(),
+        families.len(),
+        attributes.len(),
+        categories.len(),
+        attr_options_count,
+    ));
 
-        let body = if name.to_lowercase() == "families" {
-            render_family_page(&items)
-        } else {
-            render_category_page(&items)
-        };
+    // Category sections
+    body.push_str(&render_channels_section(&channels));
+    body.push_str(&render_families_section(&families));
+    body.push_str(&render_attributes_section(&attributes));
+    body.push_str(&render_categories_section(&categories));
+    body.push_str(&render_attribute_options_sections(attribute_options));
 
-        children.push(SnapshotChildPage {
-            title: page_title,
-            body,
-        });
-    }
+    // ── Child pages (one per family) ────────────────────────────────────
+    let children: Vec<SnapshotChildPage> = families
+        .iter()
+        .map(|family| {
+            let code = family
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let label = get_label(family).unwrap_or_else(|| code.to_string());
+            let page_title = format!("Family: {} ({})", label, code);
+            let page_body = render_family_detail_page(family, &attributes);
+            SnapshotChildPage {
+                title: page_title,
+                body: page_body,
+            }
+        })
+        .collect();
 
     SnapshotPageTree {
         root_title,
-        root_body,
+        root_body: body,
         children,
     }
 }
 
-/// Render a generic category child page (for non-family categories).
-fn render_category_page(items: &[Value]) -> String {
-    if items.is_empty() {
-        return "<p><em>No items.</em></p>".to_string();
+// =============================================================================
+// Overview page sections
+// =============================================================================
+
+/// Render the summary cards as a 5-column table with large counts and labels.
+fn render_summary_cards(
+    channels: usize,
+    families: usize,
+    attributes: usize,
+    categories: usize,
+    attr_options: usize,
+) -> String {
+    let mut out = String::new();
+    out.push_str("<table data-layout=\"full-width\"><tbody><tr>");
+
+    let cards = [
+        ("\u{1F4E1}", channels, "Channels"),
+        ("\u{1F4DA}", families, "Families"),
+        ("\u{2699}\u{FE0F}", attributes, "Attributes"),
+        ("\u{1F4C2}", categories, "Categories"),
+        ("\u{1F4CB}", attr_options, "Attr. Options"),
+    ];
+
+    for (icon, count, label) in &cards {
+        out.push_str(&format!(
+            "<td><p>{}</p><p><strong style=\"font-size: 24px;\">{}</strong></p><p><em>{}</em></p></td>",
+            icon, count, label,
+        ));
     }
-    render_item_table(items)
+
+    out.push_str("</tr></tbody></table>");
+    out
 }
 
-/// Render the families child page with per-family sub-sections.
-///
-/// Each family gets:
-/// - An h2 heading with the family code
-/// - A properties table (code, labels, etc.)
-/// - An "Attributes" sub-section listing the attribute codes belonging to that family
-fn render_family_page(items: &[Value]) -> String {
+/// Render the Channels section with a structured table.
+fn render_channels_section(channels: &[Value]) -> String {
     let mut out = String::new();
+    out.push_str(&section_heading("Channels", channels.len(), "Green"));
 
-    if items.is_empty() {
+    if channels.is_empty() {
+        out.push_str("<p><em>No channels.</em></p>");
+        return out;
+    }
+
+    out.push_str("<table data-layout=\"full-width\"><tbody>");
+    out.push_str("<tr><th>Code</th><th>Label</th><th>Locales</th><th>Currencies</th><th>Category Tree</th></tr>");
+
+    for ch in channels {
+        let code = get_code(ch);
+        let label = get_label(ch).unwrap_or_else(|| "\u{2014}".to_string());
+        let locales = get_string_array(ch, "locales").join(", ");
+        let currencies = get_string_array(ch, "currencies").join(", ");
+        let tree = ch
+            .get("category_tree")
+            .and_then(|v| v.as_str())
+            .unwrap_or("\u{2014}");
+
+        out.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape_html(code),
+            escape_html(&label),
+            escape_html(&locales),
+            escape_html(&currencies),
+            escape_html(tree),
+        ));
+    }
+
+    out.push_str("</tbody></table>");
+    out
+}
+
+/// Render the Families section with a structured table.
+fn render_families_section(families: &[Value]) -> String {
+    let mut out = String::new();
+    out.push_str(&section_heading("Families", families.len(), "Yellow"));
+
+    if families.is_empty() {
         out.push_str("<p><em>No families.</em></p>");
         return out;
     }
 
-    for item in items {
-        let code = item
-            .get("code")
+    out.push_str("<table data-layout=\"full-width\"><tbody>");
+    out.push_str("<tr><th>Code</th><th>Label</th><th>Attributes</th><th>Label Attr</th><th>Image Attr</th></tr>");
+
+    for fam in families {
+        let code = get_code(fam);
+        let label = get_label(fam).unwrap_or_else(|| "\u{2014}".to_string());
+        let attr_count = fam
+            .get("attributes")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let label_attr = fam
+            .get("attribute_as_label")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+            .unwrap_or("\u{2014}");
+        let image_attr = fam
+            .get("attribute_as_image")
+            .and_then(|v| v.as_str())
+            .unwrap_or("\u{2014}");
 
-        // Family heading
-        out.push_str(&format!("<h2>{}</h2>", escape_html(code)));
+        out.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td><code>{}</code></td><td><code>{}</code></td></tr>",
+            escape_html(code),
+            escape_html(&label),
+            status_lozenge(attr_count, "Blue"),
+            escape_html(label_attr),
+            escape_html(image_attr),
+        ));
+    }
 
-        // Properties table
-        let props = extract_item_properties(item);
-        if !props.is_empty() {
-            out.push_str("<table data-layout=\"full-width\"><tbody>");
-            out.push_str("<tr><th>Property</th><th>Value</th></tr>");
-            for (key, val) in &props {
-                out.push_str(&format!(
-                    "<tr><td><strong>{}</strong></td><td>{}</td></tr>",
-                    capitalize(&escape_html(key)),
-                    escape_html(val),
-                ));
-            }
-            out.push_str("</tbody></table>");
+    out.push_str("</tbody></table>");
+    out
+}
+
+/// Render the Attributes section with a structured table.
+fn render_attributes_section(attributes: &[Value]) -> String {
+    let mut out = String::new();
+    out.push_str(&section_heading("Attributes", attributes.len(), "Purple"));
+
+    if attributes.is_empty() {
+        out.push_str("<p><em>No attributes.</em></p>");
+        return out;
+    }
+
+    out.push_str("<table data-layout=\"full-width\"><tbody>");
+    out.push_str("<tr><th>Code</th><th>Label</th><th>Type</th><th>Group</th><th>Scopable</th><th>Localizable</th></tr>");
+
+    for attr in attributes {
+        let code = get_code(attr);
+        let label = get_label(attr).unwrap_or_else(|| "\u{2014}".to_string());
+        let attr_type = attr
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("\u{2014}");
+        let group = attr
+            .get("group")
+            .and_then(|v| v.as_str())
+            .unwrap_or("\u{2014}");
+        let scopable = attr
+            .get("scopable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let localizable = attr
+            .get("localizable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        out.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape_html(code),
+            escape_html(&label),
+            escape_html(attr_type),
+            escape_html(group),
+            check_icon(scopable),
+            check_icon(localizable),
+        ));
+    }
+
+    out.push_str("</tbody></table>");
+    out
+}
+
+/// Render the Categories section with a structured table.
+fn render_categories_section(categories: &[Value]) -> String {
+    let mut out = String::new();
+    out.push_str(&section_heading("Categories", categories.len(), "Blue"));
+
+    if categories.is_empty() {
+        out.push_str("<p><em>No categories.</em></p>");
+        return out;
+    }
+
+    out.push_str("<table data-layout=\"full-width\"><tbody>");
+    out.push_str("<tr><th>Code</th><th>Labels</th><th>Parent</th><th>Updated</th></tr>");
+
+    for cat in categories {
+        let code = get_code(cat);
+        let labels = render_labels_inline(cat);
+        let parent = cat
+            .get("parent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("\u{2014}");
+        let updated = cat
+            .get("updated")
+            .and_then(|v| v.as_str())
+            .unwrap_or("\u{2014}");
+
+        out.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape_html(code),
+            labels,
+            escape_html(parent),
+            escape_html(updated),
+        ));
+    }
+
+    out.push_str("</tbody></table>");
+    out
+}
+
+/// Render the Attribute Options section, grouped by parent attribute.
+/// The `options_value` is expected to be a JSON object mapping attribute codes
+/// to arrays of option objects.
+fn render_attribute_options_sections(options_value: Option<&Value>) -> String {
+    let mut out = String::new();
+
+    let Some(obj) = options_value.and_then(|v| v.as_object()) else {
+        out.push_str(&section_heading("Attribute Options", 0, "Grey"));
+        out.push_str("<p><em>No attribute options.</em></p>");
+        return out;
+    };
+
+    let total: usize = obj
+        .values()
+        .filter_map(|v| v.as_array())
+        .map(|a| a.len())
+        .sum();
+
+    out.push_str(&section_heading("Attribute Options", total, "Yellow"));
+
+    let mut attr_codes: Vec<&String> = obj.keys().collect();
+    attr_codes.sort();
+
+    for attr_code in attr_codes {
+        let options = match obj.get(attr_code).and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => continue,
+        };
+
+        out.push_str(&format!(
+            "<h3>Attribute: <code>{}</code> {}</h3>",
+            escape_html(attr_code),
+            status_lozenge(options.len(), "Grey"),
+        ));
+
+        if options.is_empty() {
+            out.push_str("<p><em>No options.</em></p>");
+            continue;
         }
 
-        // Attributes sub-section
-        let attributes = item.get("attributes").and_then(|v| v.as_array());
+        out.push_str("<table data-layout=\"full-width\"><tbody>");
+        out.push_str("<tr><th>Code</th><th>Label</th><th>Sort Order</th></tr>");
 
-        out.push_str("<h3>Attributes</h3>");
-        match attributes {
-            Some(attrs) if !attrs.is_empty() => {
-                out.push_str("<ul>");
-                for attr in attrs {
-                    let attr_code = match attr {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
+        for opt in options {
+            let code = get_code(opt);
+            let label = get_label(opt).unwrap_or_else(|| "\u{2014}".to_string());
+            let sort_order = opt
+                .get("sort_order")
+                .map(|v| match v {
+                    Value::Number(n) => n.to_string(),
+                    _ => v.to_string(),
+                })
+                .unwrap_or_else(|| "\u{2014}".to_string());
+
+            out.push_str(&format!(
+                "<tr><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+                escape_html(code),
+                escape_html(&label),
+                escape_html(&sort_order),
+            ));
+        }
+
+        out.push_str("</tbody></table>");
+    }
+
+    out
+}
+
+// =============================================================================
+// Family detail child pages
+// =============================================================================
+
+/// Render a detailed family page with configuration metadata, attribute requirements,
+/// and an enriched attributes table cross-referenced against the snapshot's attribute data.
+fn render_family_detail_page(family: &Value, all_attributes: &[Value]) -> String {
+    let mut out = String::new();
+
+    let code = get_code(family);
+    let label = get_label(family).unwrap_or_else(|| code.to_string());
+
+    // Build an attribute lookup map for cross-referencing
+    let attr_map: HashMap<&str, &Value> = all_attributes
+        .iter()
+        .filter_map(|a| a.get("code").and_then(|c| c.as_str()).map(|c| (c, a)))
+        .collect();
+
+    // ── Title ────────────────────────────────────────────────────────────
+    out.push_str(&format!("<h1>{}</h1>", escape_html(&label),));
+    out.push_str(&format!(
+        "<p><code>{}</code> \u{2014} Family configuration and associated attributes from the Akeneo PIM snapshot.</p>",
+        escape_html(code),
+    ));
+    out.push_str("<hr/>");
+
+    // ── Family Configuration ────────────────────────────────────────────
+    out.push_str("<h2>Family Configuration</h2>");
+
+    let parent = family
+        .get("parent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("\u{2014} No parent");
+    let label_attr = family
+        .get("attribute_as_label")
+        .and_then(|v| v.as_str())
+        .unwrap_or("\u{2014}");
+    let image_attr = family
+        .get("attribute_as_image")
+        .and_then(|v| v.as_str())
+        .unwrap_or("\u{2014}");
+    let family_attrs = family.get("attributes").and_then(|v| v.as_array());
+    let total_attrs = family_attrs.map(|a| a.len()).unwrap_or(0);
+
+    // Render as a 3-column x 2-row metadata table
+    out.push_str("<table data-layout=\"full-width\"><tbody>");
+    out.push_str("<tr>");
+    out.push_str(&format!(
+        "<td><strong>Family Code</strong><br/><code>{}</code></td>",
+        escape_html(code),
+    ));
+    out.push_str(&format!(
+        "<td><strong>Label</strong><br/>{}</td>",
+        escape_html(&label),
+    ));
+    out.push_str(&format!(
+        "<td><strong>Parent</strong><br/>{}</td>",
+        escape_html(parent),
+    ));
+    out.push_str("</tr><tr>");
+    out.push_str(&format!(
+        "<td><strong>Attribute as Label</strong><br/><code>{}</code></td>",
+        escape_html(label_attr),
+    ));
+    out.push_str(&format!(
+        "<td><strong>Attribute as Image</strong><br/><code>{}</code></td>",
+        escape_html(image_attr),
+    ));
+    out.push_str(&format!(
+        "<td><strong>Total Attributes</strong><br/><strong style=\"font-size: 24px;\">{}</strong></td>",
+        total_attrs,
+    ));
+    out.push_str("</tr></tbody></table>");
+
+    // ── Attribute Requirements ───────────────────────────────────────────
+    out.push_str("<h2>Attribute Requirements</h2>");
+
+    let requirements = family
+        .get("attribute_requirements")
+        .and_then(|v| v.as_object());
+
+    match requirements {
+        Some(reqs) if !reqs.is_empty() => {
+            out.push_str("<table data-layout=\"full-width\"><tbody>");
+            out.push_str("<tr><th>Channel</th><th>Required Attributes</th></tr>");
+
+            let mut channels: Vec<_> = reqs.iter().collect();
+            channels.sort_by_key(|(name, _)| name.to_lowercase());
+
+            for (channel, attrs_val) in channels {
+                let attrs = attrs_val
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|s| format!("<code>{}</code>", escape_html(s)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_else(|| "\u{2014}".to_string());
+
+                out.push_str(&format!(
+                    "<tr><td><strong>{}</strong></td><td>{}</td></tr>",
+                    escape_html(channel),
+                    attrs,
+                ));
+            }
+
+            out.push_str("</tbody></table>");
+        }
+        _ => {
+            out.push_str("<p><em>No attribute requirements defined.</em></p>");
+        }
+    }
+
+    // ── Family Attributes (enriched) ────────────────────────────────────
+    out.push_str(&format!(
+        "<h2>Family Attributes {}</h2>",
+        status_lozenge(total_attrs, "Purple"),
+    ));
+
+    match family_attrs {
+        Some(attrs) if !attrs.is_empty() => {
+            // Build a set of required attributes per channel for this family
+            let required_map: HashMap<&str, Vec<&str>> = requirements
+                .map(|reqs| {
+                    reqs.iter()
+                        .filter_map(|(ch, arr)| {
+                            arr.as_array().map(|a| {
+                                (
+                                    ch.as_str(),
+                                    a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
+                                )
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            out.push_str("<table data-layout=\"full-width\"><tbody>");
+            out.push_str("<tr><th>Attribute Code</th><th>Type</th><th>Group</th><th>Scopable</th><th>Localizable</th><th>Required</th></tr>");
+
+            for attr_val in attrs {
+                let attr_code = attr_val.as_str().unwrap_or("unknown");
+
+                // Cross-reference with the snapshot's attributes data
+                let (attr_type, group, scopable, localizable) =
+                    if let Some(attr_data) = attr_map.get(attr_code) {
+                        (
+                            attr_data
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("\u{2014}"),
+                            attr_data
+                                .get("group")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("\u{2014}"),
+                            attr_data
+                                .get("scopable")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            attr_data
+                                .get("localizable")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                        )
+                    } else {
+                        ("\u{2014}", "\u{2014}", false, false)
                     };
-                    out.push_str(&format!(
-                        "<li><code>{}</code></li>",
-                        escape_html(&attr_code),
-                    ));
-                }
-                out.push_str("</ul>");
+
+                // Determine which channels require this attribute
+                let required_channels: Vec<&str> = required_map
+                    .iter()
+                    .filter(|(_, req_attrs)| req_attrs.contains(&attr_code))
+                    .map(|(ch, _)| *ch)
+                    .collect();
+
+                let required_display = if required_channels.is_empty() {
+                    "\u{2014}".to_string()
+                } else {
+                    required_channels
+                        .iter()
+                        .map(|ch| escape_html(ch))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+
+                out.push_str(&format!(
+                    "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                    escape_html(attr_code),
+                    escape_html(attr_type),
+                    escape_html(group),
+                    check_icon(scopable),
+                    check_icon(localizable),
+                    required_display,
+                ));
             }
-            _ => {
-                out.push_str("<p><em>No attributes.</em></p>");
-            }
+
+            out.push_str("</tbody></table>");
+        }
+        _ => {
+            out.push_str("<p><em>No attributes in this family.</em></p>");
         }
     }
 
@@ -457,4 +890,75 @@ fn escape_html(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+// =============================================================================
+// Snapshot-specific helpers
+// =============================================================================
+
+/// Render a section heading with an uppercase label and a count lozenge.
+fn section_heading(label: &str, count: usize, color: &str) -> String {
+    format!(
+        "<h2>{} {}</h2>",
+        escape_html(&label.to_uppercase()),
+        status_lozenge(count, color),
+    )
+}
+
+/// Render a checkmark or X icon for boolean values.
+fn check_icon(val: bool) -> &'static str {
+    if val {
+        "\u{2705}" // green checkmark emoji
+    } else {
+        "\u{274C}" // red X emoji
+    }
+}
+
+/// Extract the "code" field from a JSON object.
+fn get_code(item: &Value) -> &str {
+    item.get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+}
+
+/// Extract the first available label from a JSON object's "labels" field.
+fn get_label(item: &Value) -> Option<String> {
+    item.get("labels")
+        .and_then(|v| v.as_object())
+        .and_then(|labels| labels.values().next())
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Extract an array of strings from a JSON object field.
+fn get_string_array(item: &Value, field: &str) -> Vec<String> {
+    item.get(field)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Render labels as inline locale-tagged text (e.g., "en_GB: Label, de_AT: Label").
+fn render_labels_inline(item: &Value) -> String {
+    item.get("labels")
+        .and_then(|v| v.as_object())
+        .map(|labels| {
+            labels
+                .iter()
+                .map(|(locale, val)| {
+                    let text = val.as_str().unwrap_or("\u{2014}");
+                    format!(
+                        "<strong>{}</strong>: {}",
+                        escape_html(locale),
+                        escape_html(text),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_else(|| "\u{2014}".to_string())
 }
